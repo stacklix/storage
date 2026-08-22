@@ -197,7 +197,7 @@ def upsert_today_row(
         "date": date,
         "total_equity": str(round(total_equity)),
         "trx_balance": str(round(trx_balance)),
-        "trx_liquidation_price": str(round(trx_liquidation_price)) if trx_liquidation_price is not None else "",
+        "trx_liquidation_price": f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "",
     }
 
     for index, existing in enumerate(rows):
@@ -230,7 +230,7 @@ def main() -> int:
     rows, action = upsert_today_row(rows, today, total_equity, trx_balance, trx_liquidation_price)
     write_csv_rows(CSV_PATH, rows)
 
-    liq_display = round(trx_liquidation_price) if trx_liquidation_price is not None else "N/A"
+    liq_display = f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "N/A"
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
         f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
