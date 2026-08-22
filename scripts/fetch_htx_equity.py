@@ -21,7 +21,7 @@ HOST = "api.hbdm.com"
 BASE_URL = f"https://{HOST}"
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "htx_equity.csv"
-CSV_HEADER = ["date", "total_equity", "trx_balance"]
+CSV_HEADER = ["date", "total_equity", "trx_balance", "trx_liquidation_price"]
 DEFAULT_VALUATION_ASSET = "USDT"
 # Coin-margined swap docs list USD but not USDT; USD valuation is USDT-equivalent.
 VALUATION_ASSET_FALLBACKS = ("USDT", "USD")
@@ -146,13 +146,30 @@ def fetch_trx_balance(access_key: str, secret_key: str) -> float:
     return 0.0
 
 
+def fetch_trx_liquidation_price(access_key: str, secret_key: str) -> float | None:
+    payload = post_private(
+        "/swap-api/v1/swap_position_info",
+        access_key,
+        secret_key,
+        {"contract_code": "TRX-USD"},
+    )
+
+    for item in payload.get("data", []):
+        if item.get("contract_code", "").upper() == "TRX-USD":
+            liq = item.get("liquidation_price")
+            if liq is not None:
+                return float(liq)
+
+    return None
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
 
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        if reader.fieldnames != CSV_HEADER:
+        if list(reader.fieldnames or []) != CSV_HEADER:
             raise HtxApiError(
                 f"Unexpected CSV header in {path}: expected {CSV_HEADER}, "
                 f"got {reader.fieldnames}"
@@ -174,11 +191,13 @@ def upsert_today_row(
     date: str,
     total_equity: float,
     trx_balance: float,
+    trx_liquidation_price: float | None,
 ) -> tuple[list[dict[str, str]], str]:
     row = {
         "date": date,
         "total_equity": str(round(total_equity)),
         "trx_balance": str(round(trx_balance)),
+        "trx_liquidation_price": str(round(trx_liquidation_price)) if trx_liquidation_price is not None else "",
     }
 
     for index, existing in enumerate(rows):
@@ -202,17 +221,20 @@ def main() -> int:
     try:
         total_equity = fetch_total_equity(access_key, secret_key)
         trx_balance = fetch_trx_balance(access_key, secret_key)
+        trx_liquidation_price = fetch_trx_liquidation_price(access_key, secret_key)
     except HtxApiError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
     rows = read_csv_rows(CSV_PATH)
-    rows, action = upsert_today_row(rows, today, total_equity, trx_balance)
+    rows, action = upsert_today_row(rows, today, total_equity, trx_balance, trx_liquidation_price)
     write_csv_rows(CSV_PATH, rows)
 
+    liq_display = round(trx_liquidation_price) if trx_liquidation_price is not None else "N/A"
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
-        f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}"
+        f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
+        f"trx_liquidation_price={liq_display}"
     )
     return 0
 
