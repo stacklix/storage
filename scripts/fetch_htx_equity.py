@@ -177,8 +177,8 @@ def upsert_today_row(
 ) -> tuple[list[dict[str, str]], str]:
     row = {
         "date": date,
-        "total_equity": f"{total_equity:.8f}",
-        "trx_balance": f"{trx_balance:.8f}",
+        "total_equity": str(round(total_equity)),
+        "trx_balance": str(round(trx_balance)),
     }
 
     for index, existing in enumerate(rows):
@@ -212,7 +212,7 @@ def main() -> int:
 
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
-        f"total_equity={total_equity:.8f}, trx_balance={trx_balance:.8f}"
+        f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}"
     )
     return 0
 
