@@ -131,7 +131,12 @@ def fetch_total_equity(access_key: str, secret_key: str) -> float:
     raise HtxApiError("No valuation data returned from HTX")
 
 
-def fetch_trx_balance(access_key: str, secret_key: str) -> float:
+def fetch_trx_account(access_key: str, secret_key: str) -> tuple[float, float | None]:
+    """Return (margin_balance, liquidation_price) for TRX-USD.
+
+    liquidation_price comes from swap_account_info (not swap_position_info).
+    It is null when there is no open position.
+    """
     payload = post_private(
         "/swap-api/v1/swap_account_info",
         access_key,
@@ -140,27 +145,16 @@ def fetch_trx_balance(access_key: str, secret_key: str) -> float:
     )
 
     for item in payload.get("data", []):
-        if item.get("symbol", "").upper() == "TRX":
-            return float(item["margin_balance"])
+        if item.get("symbol", "").upper() != "TRX":
+            continue
 
-    return 0.0
+        balance = float(item.get("margin_balance") or 0)
+        liq_raw = item.get("liquidation_price")
+        if liq_raw is None or liq_raw == "":
+            return balance, None
+        return balance, float(liq_raw)
 
-
-def fetch_trx_liquidation_price(access_key: str, secret_key: str) -> float | None:
-    payload = post_private(
-        "/swap-api/v1/swap_position_info",
-        access_key,
-        secret_key,
-        {"contract_code": "TRX-USD"},
-    )
-
-    for item in payload.get("data", []):
-        if item.get("contract_code", "").upper() == "TRX-USD":
-            liq = item.get("liquidation_price")
-            if liq is not None:
-                return float(liq)
-
-    return None
+    return 0.0, None
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -220,8 +214,7 @@ def main() -> int:
 
     try:
         total_equity = fetch_total_equity(access_key, secret_key)
-        trx_balance = fetch_trx_balance(access_key, secret_key)
-        trx_liquidation_price = fetch_trx_liquidation_price(access_key, secret_key)
+        trx_balance, trx_liquidation_price = fetch_trx_account(access_key, secret_key)
     except HtxApiError as exc:
         print(str(exc), file=sys.stderr)
         return 1
