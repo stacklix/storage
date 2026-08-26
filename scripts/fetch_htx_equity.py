@@ -212,52 +212,6 @@ def fetch_current_trx_price() -> float:
     raise HtxApiError("No current TRX price returned from HTX")
 
 
-def fetch_historical_trx_price(date: str) -> float:
-    target = datetime.strptime(date, "%Y%m%d").replace(
-        hour=22,
-        minute=0,
-        second=0,
-        tzinfo=TIMEZONE,
-    )
-    target_ts = int(target.timestamp())
-    last_error: HtxApiError | None = None
-    for contract_code in TRX_MARKET_CONTRACT_CODES:
-        try:
-            payload = get_public(
-                "/swap-ex/market/history/kline",
-                {
-                    "contract_code": contract_code,
-                    "period": "1min",
-                    "from": target_ts - 600,
-                    "to": target_ts + 600,
-                },
-            )
-        except HtxApiError as exc:
-            last_error = exc
-            continue
-
-        candles = payload.get("data") or []
-        if not candles:
-            last_error = HtxApiError(
-                f"No historical TRX price returned for {date} using {contract_code}"
-            )
-            continue
-
-        candle = min(
-            candles,
-            key=lambda item: abs(int(item.get("id", 0)) - target_ts),
-        )
-        price = candle.get("close")
-        if price not in (None, ""):
-            return float(price)
-
-        last_error = HtxApiError(
-            f"No historical TRX price returned for {date} using {contract_code}"
-        )
-
-    if last_error is not None:
-        raise last_error
-    raise HtxApiError(f"No historical TRX price returned for {date}")
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -313,32 +267,6 @@ def upsert_today_row(
     return rows, "appended"
 
 
-def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> str:
-    missing_rows = [
-        row for row in rows if row.get("trx_price") in (None, "")
-    ]
-    if not missing_rows:
-        return "none"
-
-    updated_count = 0
-    for row in missing_rows:
-        try:
-            row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.3f}"
-        except HtxApiError as exc:
-            print(
-                f"Warning: unable to backfill TRX price for {row['date']}: {exc}",
-                file=sys.stderr,
-            )
-            continue
-        updated_count += 1
-
-    if updated_count == 0:
-        return "none"
-    if updated_count == len(missing_rows):
-        return "full"
-    return "partial"
-
-
 def main() -> int:
     access_key = os.environ.get("HTX_AK", "").strip()
     secret_key = os.environ.get("HTX_SK", "").strip()
@@ -357,7 +285,6 @@ def main() -> int:
         return 1
 
     rows = read_csv_rows(CSV_PATH)
-    backfill_status = backfill_missing_trx_prices(rows)
     rows, action = upsert_today_row(
         rows,
         today,
@@ -373,8 +300,7 @@ def main() -> int:
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
         f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
-        f"trx_liquidation_price={liq_display}, trx_price={price_display}, "
-        f"history_backfilled={backfill_status}"
+        f"trx_liquidation_price={liq_display}, trx_price={price_display}"
     )
     return 0
 
