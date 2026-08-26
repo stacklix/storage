@@ -281,11 +281,15 @@ def upsert_today_row(
     return rows, "appended"
 
 
-def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> bool:
-    updated = False
-    for row in rows:
-        if row.get("trx_price") not in (None, ""):
-            continue
+def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> str:
+    missing_rows = [
+        row for row in rows if row.get("trx_price") in (None, "")
+    ]
+    if not missing_rows:
+        return "none"
+
+    updated_count = 0
+    for row in missing_rows:
         try:
             row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.6f}"
         except HtxApiError as exc:
@@ -294,8 +298,13 @@ def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> bool:
                 file=sys.stderr,
             )
             continue
-        updated = True
-    return updated
+        updated_count += 1
+
+    if updated_count == 0:
+        return "none"
+    if updated_count == len(missing_rows):
+        return "full"
+    return "partial"
 
 
 def main() -> int:
@@ -316,7 +325,7 @@ def main() -> int:
         return 1
 
     rows = read_csv_rows(CSV_PATH)
-    backfilled = backfill_missing_trx_prices(rows)
+    backfill_status = backfill_missing_trx_prices(rows)
     rows, action = upsert_today_row(
         rows,
         today,
@@ -333,7 +342,7 @@ def main() -> int:
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
         f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
         f"trx_liquidation_price={liq_display}, trx_price={price_display}, "
-        f"history_backfilled={'yes' if backfilled else 'no'}"
+        f"history_backfilled={backfill_status}"
     )
     return 0
 
