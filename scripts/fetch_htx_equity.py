@@ -300,8 +300,8 @@ def upsert_today_row(
         "date": date,
         "total_equity": str(round(total_equity)),
         "trx_balance": str(round(trx_balance)),
-        "trx_liquidation_price": f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "",
-        "trx_price": f"{trx_price:.6f}",
+        "trx_liquidation_price": f"{trx_liquidation_price:.3f}" if trx_liquidation_price is not None else "",
+        "trx_price": f"{trx_price:.3f}",
     }
 
     for index, existing in enumerate(rows):
@@ -323,7 +323,7 @@ def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> str:
     updated_count = 0
     for row in missing_rows:
         try:
-            row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.6f}"
+            row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.3f}"
         except HtxApiError as exc:
             print(
                 f"Warning: unable to backfill TRX price for {row['date']}: {exc}",
@@ -368,8 +368,8 @@ def main() -> int:
     )
     write_csv_rows(CSV_PATH, rows)
 
-    liq_display = f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "N/A"
-    price_display = f"{trx_price:.6f}"
+    liq_display = f"{trx_liquidation_price:.3f}" if trx_liquidation_price is not None else "N/A"
+    price_display = f"{trx_price:.3f}"
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
         f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
