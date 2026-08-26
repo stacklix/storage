@@ -21,10 +21,12 @@ HOST = "api.hbdm.com"
 BASE_URL = f"https://{HOST}"
 TIMEZONE = ZoneInfo("Asia/Shanghai")
 CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "htx_equity.csv"
-CSV_HEADER = ["date", "total_equity", "trx_balance", "trx_liquidation_price"]
+CSV_HEADER = ["date", "total_equity", "trx_balance", "trx_liquidation_price", "trx_price"]
+LEGACY_CSV_HEADER = ["date", "total_equity", "trx_balance", "trx_liquidation_price"]
 DEFAULT_VALUATION_ASSET = "USDT"
 # Coin-margined swap docs list USD but not USDT; USD valuation is USDT-equivalent.
 VALUATION_ASSET_FALLBACKS = ("USDT", "USD")
+TRX_MARKET_CONTRACT_CODES = ("TRX-USD", "TRX-USD-SWAP")
 
 
 class HtxApiError(Exception):
@@ -76,6 +78,33 @@ def post_private(
             "Content-Type": "application/json",
             "User-Agent": "storage-htx-equity-script/1.0",
         },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HtxApiError(f"HTTP {exc.code} for {path}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise HtxApiError(f"Network error for {path}: {exc}") from exc
+
+    if payload.get("status") != "ok":
+        raise HtxApiError(f"API error for {path}: {payload}")
+
+    return payload
+
+
+def get_public(path: str, params: dict[str, str | int] | None = None) -> dict:
+    query = urllib.parse.urlencode(params or {})
+    url = f"{BASE_URL}{path}"
+    if query:
+        url = f"{url}?{query}"
+
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "storage-htx-equity-script/1.0"},
     )
 
     try:
@@ -157,18 +186,97 @@ def fetch_trx_account(access_key: str, secret_key: str) -> tuple[float, float | 
     return 0.0, None
 
 
+def fetch_current_trx_price() -> float:
+    last_error: HtxApiError | None = None
+    for contract_code in TRX_MARKET_CONTRACT_CODES:
+        try:
+            payload = get_public(
+                "/swap-ex/market/detail/merged",
+                {"contract_code": contract_code},
+            )
+        except HtxApiError as exc:
+            last_error = exc
+            continue
+
+        tick = payload.get("tick") or {}
+        price = tick.get("close")
+        if price not in (None, ""):
+            return float(price)
+
+        last_error = HtxApiError(
+            f"No current TRX price returned from HTX for {contract_code}"
+        )
+
+    if last_error is not None:
+        raise last_error
+    raise HtxApiError("No current TRX price returned from HTX")
+
+
+def fetch_historical_trx_price(date: str) -> float:
+    target = datetime.strptime(date, "%Y%m%d").replace(
+        hour=22,
+        minute=0,
+        second=0,
+        tzinfo=TIMEZONE,
+    )
+    target_ts = int(target.timestamp())
+    last_error: HtxApiError | None = None
+    for contract_code in TRX_MARKET_CONTRACT_CODES:
+        try:
+            payload = get_public(
+                "/swap-ex/market/history/kline",
+                {
+                    "contract_code": contract_code,
+                    "period": "1min",
+                    "from": target_ts - 600,
+                    "to": target_ts + 600,
+                },
+            )
+        except HtxApiError as exc:
+            last_error = exc
+            continue
+
+        candles = payload.get("data") or []
+        if not candles:
+            last_error = HtxApiError(
+                f"No historical TRX price returned for {date} using {contract_code}"
+            )
+            continue
+
+        candle = min(
+            candles,
+            key=lambda item: abs(int(item.get("id", 0)) - target_ts),
+        )
+        price = candle.get("close")
+        if price not in (None, ""):
+            return float(price)
+
+        last_error = HtxApiError(
+            f"No historical TRX price returned for {date} using {contract_code}"
+        )
+
+    if last_error is not None:
+        raise last_error
+    raise HtxApiError(f"No historical TRX price returned for {date}")
+
+
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
     if not path.exists():
         return []
 
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
-        if list(reader.fieldnames or []) != CSV_HEADER:
+        fieldnames = list(reader.fieldnames or [])
+        if fieldnames not in (CSV_HEADER, LEGACY_CSV_HEADER):
             raise HtxApiError(
                 f"Unexpected CSV header in {path}: expected {CSV_HEADER}, "
                 f"got {reader.fieldnames}"
             )
-        return list(reader)
+        rows = []
+        for row in reader:
+            normalized = {column: row.get(column, "") for column in CSV_HEADER}
+            rows.append(normalized)
+        return rows
 
 
 def write_csv_rows(path: Path, rows: list[dict[str, str]]) -> None:
@@ -186,12 +294,14 @@ def upsert_today_row(
     total_equity: float,
     trx_balance: float,
     trx_liquidation_price: float | None,
+    trx_price: float,
 ) -> tuple[list[dict[str, str]], str]:
     row = {
         "date": date,
         "total_equity": str(round(total_equity)),
         "trx_balance": str(round(trx_balance)),
         "trx_liquidation_price": f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "",
+        "trx_price": f"{trx_price:.6f}",
     }
 
     for index, existing in enumerate(rows):
@@ -201,6 +311,32 @@ def upsert_today_row(
 
     rows.append(row)
     return rows, "appended"
+
+
+def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> str:
+    missing_rows = [
+        row for row in rows if row.get("trx_price") in (None, "")
+    ]
+    if not missing_rows:
+        return "none"
+
+    updated_count = 0
+    for row in missing_rows:
+        try:
+            row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.6f}"
+        except HtxApiError as exc:
+            print(
+                f"Warning: unable to backfill TRX price for {row['date']}: {exc}",
+                file=sys.stderr,
+            )
+            continue
+        updated_count += 1
+
+    if updated_count == 0:
+        return "none"
+    if updated_count == len(missing_rows):
+        return "full"
+    return "partial"
 
 
 def main() -> int:
@@ -215,19 +351,30 @@ def main() -> int:
     try:
         total_equity = fetch_total_equity(access_key, secret_key)
         trx_balance, trx_liquidation_price = fetch_trx_account(access_key, secret_key)
+        trx_price = fetch_current_trx_price()
     except HtxApiError as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
     rows = read_csv_rows(CSV_PATH)
-    rows, action = upsert_today_row(rows, today, total_equity, trx_balance, trx_liquidation_price)
+    backfill_status = backfill_missing_trx_prices(rows)
+    rows, action = upsert_today_row(
+        rows,
+        today,
+        total_equity,
+        trx_balance,
+        trx_liquidation_price,
+        trx_price,
+    )
     write_csv_rows(CSV_PATH, rows)
 
     liq_display = f"{trx_liquidation_price:.2f}" if trx_liquidation_price is not None else "N/A"
+    price_display = f"{trx_price:.6f}"
     print(
         f"{action.capitalize()} {CSV_PATH}: date={today}, "
         f"total_equity={round(total_equity)}, trx_balance={round(trx_balance)}, "
-        f"trx_liquidation_price={liq_display}"
+        f"trx_liquidation_price={liq_display}, trx_price={price_display}, "
+        f"history_backfilled={backfill_status}"
     )
     return 0
 
