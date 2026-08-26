@@ -212,7 +212,6 @@ def fetch_historical_trx_price(date: str) -> float:
             "period": "1min",
             "from": target_ts - 600,
             "to": target_ts + 600,
-            "size": 25,
         },
     )
     candles = payload.get("data") or []
