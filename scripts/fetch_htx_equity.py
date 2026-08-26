@@ -284,7 +284,7 @@ def upsert_today_row(
 def backfill_missing_trx_prices(rows: list[dict[str, str]]) -> bool:
     updated = False
     for row in rows:
-        if row.get("trx_price"):
+        if row.get("trx_price") not in (None, ""):
             continue
         try:
             row["trx_price"] = f"{fetch_historical_trx_price(row['date']):.6f}"
