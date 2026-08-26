@@ -26,6 +26,7 @@ LEGACY_CSV_HEADER = ["date", "total_equity", "trx_balance", "trx_liquidation_pri
 DEFAULT_VALUATION_ASSET = "USDT"
 # Coin-margined swap docs list USD but not USDT; USD valuation is USDT-equivalent.
 VALUATION_ASSET_FALLBACKS = ("USDT", "USD")
+TRX_MARKET_CONTRACT_CODES = ("TRX-USD", "TRX-USD-SWAP")
 
 
 class HtxApiError(Exception):
@@ -186,15 +187,29 @@ def fetch_trx_account(access_key: str, secret_key: str) -> tuple[float, float | 
 
 
 def fetch_current_trx_price() -> float:
-    payload = get_public(
-        "/swap-ex/market/detail/merged",
-        {"contract_code": "TRX-USD"},
-    )
-    tick = payload.get("tick") or {}
-    price = tick.get("close")
-    if price in (None, ""):
-        raise HtxApiError("No current TRX price returned from HTX")
-    return float(price)
+    last_error: HtxApiError | None = None
+    for contract_code in TRX_MARKET_CONTRACT_CODES:
+        try:
+            payload = get_public(
+                "/swap-ex/market/detail/merged",
+                {"contract_code": contract_code},
+            )
+        except HtxApiError as exc:
+            last_error = exc
+            continue
+
+        tick = payload.get("tick") or {}
+        price = tick.get("close")
+        if price not in (None, ""):
+            return float(price)
+
+        last_error = HtxApiError(
+            f"No current TRX price returned from HTX for {contract_code}"
+        )
+
+    if last_error is not None:
+        raise last_error
+    raise HtxApiError("No current TRX price returned from HTX")
 
 
 def fetch_historical_trx_price(date: str) -> float:
@@ -205,27 +220,44 @@ def fetch_historical_trx_price(date: str) -> float:
         tzinfo=TIMEZONE,
     )
     target_ts = int(target.timestamp())
-    payload = get_public(
-        "/swap-ex/market/history/kline",
-        {
-            "contract_code": "TRX-USD",
-            "period": "1min",
-            "from": target_ts - 600,
-            "to": target_ts + 600,
-        },
-    )
-    candles = payload.get("data") or []
-    if not candles:
-        raise HtxApiError(f"No historical TRX price returned for {date}")
+    last_error: HtxApiError | None = None
+    for contract_code in TRX_MARKET_CONTRACT_CODES:
+        try:
+            payload = get_public(
+                "/swap-ex/market/history/kline",
+                {
+                    "contract_code": contract_code,
+                    "period": "1min",
+                    "from": target_ts - 600,
+                    "to": target_ts + 600,
+                },
+            )
+        except HtxApiError as exc:
+            last_error = exc
+            continue
 
-    candle = min(
-        candles,
-        key=lambda item: abs(int(item.get("id", 0)) - target_ts),
-    )
-    price = candle.get("close")
-    if price in (None, ""):
-        raise HtxApiError(f"No historical TRX price returned for {date}")
-    return float(price)
+        candles = payload.get("data") or []
+        if not candles:
+            last_error = HtxApiError(
+                f"No historical TRX price returned for {date} using {contract_code}"
+            )
+            continue
+
+        candle = min(
+            candles,
+            key=lambda item: abs(int(item.get("id", 0)) - target_ts),
+        )
+        price = candle.get("close")
+        if price not in (None, ""):
+            return float(price)
+
+        last_error = HtxApiError(
+            f"No historical TRX price returned for {date} using {contract_code}"
+        )
+
+    if last_error is not None:
+        raise last_error
+    raise HtxApiError(f"No historical TRX price returned for {date}")
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
